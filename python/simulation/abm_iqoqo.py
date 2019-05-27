@@ -1,14 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3.6
 # -*- coding: utf-8 -*-
-"""
-Created on Thu Aug 16 14:50:11 2018
-
-@author: doorleyr
-"""
 
 #!flask/bin/python
-from flask import Flask, jsonify, make_response
-import threading
 import atexit
 import pickle
 import json
@@ -17,12 +10,12 @@ import urllib
 import pyproj
 import math
 import pandas as pd
-from flask_cors import CORS
 import numpy as np
 import networkx as nx
+import datetime
+import time
 from scipy import spatial
 from Agents import Person, Location, House
-
 
 # =============================================================================
 # Functions
@@ -60,7 +53,7 @@ def createGrid(topLeft_lonLat, topEdge_lonLat, utm, wgs, cell_size, nrows, ncols
 
 def predict_modes(agent_list):
     # instead of using get attribute one at a time: create a class method to return the dict
-    feature_df=pd.DataFrame([{f:getattr(a, f) for f in ['age', 'hh_income','male',
+    feature_df=pd.DataFrame([{f:getattr(a, f, 0) for f in ['age', 'hh_income','male',
              'bachelor_degree', 'pop_per_sqmile_home',
              'network_dist_km']} for a in agent_list])    
     feature_df['drive_time_minutes']=  60*feature_df['network_dist_km']/speeds[0]     
@@ -89,15 +82,15 @@ region_lat_bounds=[53.491466, 53.56]
 #region_lon_bounds=[-90, 90]
 #region_lat_bounds=[-90, 90]
 
-SYNTHPOP_PATH='../'+city+'/clean/synth_pop.csv'
-PICKLED_MODEL_PATH='../models/trip_mode_rf.p'
-ZONE_NODE_ROUTES_PATH='../'+city+'/clean/route_nodes.json'
-CONNECTION_NODE_ROUTES_PATH='../'+city+'/clean/connection_route_nodes.json'
-NODES_PATH='../'+city+'/clean/nodes.csv'
-CONNECTION_POINTS_PATH='../'+city+'/clean/connection_points.json'
-RF_FEATURES_LIST_PATH='../models/rf_features.json'
-FITTED_HOME_LOC_MODEL_PATH='../models/home_loc_logit.p'
-CITYIO_SAMPLE_PATH='../'+city+'/clean/sample_cityio_data.json'
+SYNTHPOP_PATH='synth_pop.csv'
+PICKLED_MODEL_PATH='trip_mode_rf.p'
+ZONE_NODE_ROUTES_PATH='route_nodes.json'
+CONNECTION_NODE_ROUTES_PATH='connection_route_nodes.json'
+NODES_PATH='nodes.csv'
+CONNECTION_POINTS_PATH='connection_points.json'
+RF_FEATURES_LIST_PATH='rf_features.json'
+FITTED_HOME_LOC_MODEL_PATH='home_loc_logit.p'
+CITYIO_SAMPLE_PATH='sample_cityio_data.json'
 
 PERSONS_PER_BLD=2
 BASE_AGENTS=100
@@ -235,24 +228,11 @@ for i in range(VACANT_HOUSES):
 housing=base_housing+[]
 
 # =============================================================================
-# Create the Flask app
+# Do the work
 # =============================================================================
 
-dataLock = threading.Lock()
-# thread handler
-yourThread = threading.Thread()
-
-def create_app():
-    app = Flask(__name__)
-
-    def interrupt():
-        global yourThread
-        yourThread.cancel()
-
-    def background():
-        global agents, base_agents, new_agents, lastId, base_housing, new_housing, housing
-        with dataLock:
-#            print('Getting grid update')
+def do_work():
+            global agents, base_agents, new_agents, lastId, base_housing, new_housing, housing
             with urllib.request.urlopen(cityIO_grid_url) as url:
             #get the latest json data
             #    print('Getting initial grid data')
@@ -296,42 +276,28 @@ def create_app():
                 for ag in new_agents:
                     ag.init_routes(routes, node_coords)      
             lastId=hash_id
-        yourThread = threading.Timer(POOL_TIME, background, args=())
-        yourThread.start()        
 
-    def initialise():
-        # Create the initial background thread
-        yourThread = threading.Timer(POOL_TIME, background, args=())
-        yourThread.start()
-    # Initiate
-    initialise()
-    # When you kill Flask (SIGTERM), clear the trigger for the next thread
-    atexit.register(interrupt)
-    return app
-
-app = create_app()
-CORS(app)
-
-@app.route('/abm_service/Hamburg/routes/<int:period>', methods=['GET'])
 def return_routes(period):
 #    print('Data requested')
     for ag in agents: ag.init_period(period, TIMESTEP_SEC)
     predict_modes(agents)
+    valid_agents = [ag for ag in agents if hasattr(ag, "route")]
     agent_data= {ag.person_id: 
         {'mode':ag.mode,
 #         'route':[[int(c[0]*1e5)/1e5,int(c[1]*1e5)/1e5]  for c in ag.route['coordinates']],
          'route':ag.route['nodes'],
          'distances':ag.route['distances']
-        } for ag in agents}
+        } for ag in valid_agents}
     return json.dumps(agent_data)
 
 
-@app.errorhandler(404)
-# standard error is html message- we need to ensure that the response is always json
-def not_found(error):
-    return make_response(jsonify({'error': 'Not found'}), 404)
+PERIOD = 12
+TIMEOUT = 10 # minutes
 
 if __name__ == '__main__':
-    app.run(port=8000, debug=False, use_reloader=False, threaded=True)
-    # if reloader is True, it starts the background thread twice
-
+    time_start = datetime.datetime.now()
+    while datetime.datetime.now() < time_start + datetime.timedelta(minutes=10):
+        do_work()
+        time.sleep(POOL_TIME)
+        
+    print(return_routes(PERIOD))
